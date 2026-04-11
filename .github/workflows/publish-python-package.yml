@@ -1,0 +1,190 @@
+name: Publish Python Package
+
+on:
+  push:
+    branches:
+      - development
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-development
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/astral-sh/uv:python3.12-bookworm
+    outputs:
+      should_release: ${{ steps.version.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect version bump
+        id: version
+        shell: bash
+        run: |
+          current_version="$(python -c 'import tomllib; from pathlib import Path; data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8")); print(data["project"]["version"])')"
+          echo "version=$current_version" >> "$GITHUB_OUTPUT"
+
+          previous_ref="${{ github.event.before }}"
+          if [ -n "$previous_ref" ] && git cat-file -e "${previous_ref}:pyproject.toml" 2>/dev/null; then
+            previous_version="$(git show "${previous_ref}:pyproject.toml" | python -c 'import sys, tomllib; data = tomllib.loads(sys.stdin.read()); print(data["project"]["version"])')"
+          else
+            previous_version=""
+          fi
+
+          if [ "$current_version" = "$previous_version" ]; then
+            echo "No version bump detected. Skipping release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git rev-parse "refs/tags/v${current_version}" >/dev/null 2>&1; then
+            echo "Tag v${current_version} already exists." >&2
+            exit 1
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+  test_build:
+    name: Test & Build
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/astral-sh/uv:python3.12-bookworm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Create venv
+        run: uv venv
+
+      - name: Install project + dev deps
+        run: uv sync --group dev
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs:
+      - prepare
+      - test_build
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/astral-sh/uv:python3.12-bookworm
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Publish to PyPI
+        run: uv publish dist/* --token ${{ secrets.PYPI_API_TOKEN }}
+
+  tag_release:
+    name: Tag Release
+    needs:
+      - prepare
+      - publish
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create release tag
+        shell: bash
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${version}" "${GITHUB_SHA}"
+          git push origin "v${version}"
+
+  github_release:
+    name: Create GitHub Release
+    needs:
+      - prepare
+      - tag_release
+    if: needs.prepare.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build release notes
+        shell: bash
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          previous_tag="$(git tag --sort=-version:refname | grep -v "^v${version}$" | head -n 1)"
+          version_notes="release-notes/v${version}.md"
+
+          if [ -f "$version_notes" ]; then
+            cp "$version_notes" release-notes.md
+          else
+            {
+              echo "## Release"
+              echo
+              echo "This release is published to PyPI."
+              echo
+              echo "Install with:"
+              echo
+              echo "\`\`\`bash"
+              echo "pip install -U tabulynx"
+              echo "\`\`\`"
+            } > release-notes.md
+          fi
+
+          if [ -n "$previous_tag" ]; then
+            {
+              echo
+              echo "## Full Changelog"
+              echo
+              echo "https://github.com/${{ github.repository }}/compare/${previous_tag}...v${version}"
+            } >> release-notes.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "v${{ needs.prepare.outputs.version }}" \
+            --notes-file release-notes.md \
+            --title "v${{ needs.prepare.outputs.version }}"
