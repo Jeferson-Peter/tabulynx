@@ -152,7 +152,7 @@ jobs:
         shell: bash
         run: |
           version="${{ needs.prepare.outputs.version }}"
-          previous_tag="$(git tag --sort=-version:refname | grep -v "^v${version}$" | head -n 1)"
+          previous_tag="$(git tag --sort=-version:refname | grep -v "^v${version}$" | head -n 1 || true)"
           version_notes="release-notes/v${version}.md"
 
           if [ -f "$version_notes" ]; then
