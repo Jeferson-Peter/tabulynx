@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from tabulynx.core import ColumnFilter, ColumnStats, DatasetProfile, DatasetSession, QueryState, SortRule, open_dataset
+from tabulynx.core import ColumnFilter, ColumnStats, DatasetSession, QueryState, SortRule, open_dataset
 
 
 PAGE_SIZE = 200
@@ -1287,8 +1287,9 @@ class DatasetTab(QWidget):
         visible_count = len(self._dataset.columns())
         total_columns = len(self._dataset.columns(all_columns=True))
         source_suffix = "optimized workbook cache" if self._dataset.uses_excel_cache else "source file"
+        row_count = self._model.range_summary()[2]
         self._meta_label.setText(
-            f"{self._dataset.row_count():,} rows, {visible_count}/{total_columns} columns, "
+            f"{row_count:,} rows, {visible_count}/{total_columns} columns, "
             f"{filter_suffix}, {search_suffix}, {source_suffix}: {self._dataset.path}"
         )
         self._columns_button.setText(
@@ -1639,10 +1640,9 @@ class DatasetTab(QWidget):
         if self._dataset is None:
             return
 
-        profile = self._dataset.dataset_profile()
         self._details_title.setText("Dataset summary")
-        self._details_hint.setText("Select a row for values or click a column for stats.")
-        for line in self._format_profile_lines(profile):
+        self._details_hint.setText("Quick overview. Select a row for values or click a column for detailed stats.")
+        for line in self._format_profile_lines():
             self._details_list.addItem(QListWidgetItem(line))
 
     def _format_stats_lines(self, stats: ColumnStats) -> list[str]:
@@ -1659,20 +1659,40 @@ class DatasetTab(QWidget):
             lines.append(f"Top values\n{top_values}")
         return lines
 
-    def _format_profile_lines(self, profile: DatasetProfile) -> list[str]:
-        type_summary = ", ".join(f"{name}: {count}" for name, count in sorted(profile.type_counts.items()))
+    def _format_profile_lines(self) -> list[str]:
+        if self._dataset is None:
+            return []
+
+        columns = self._dataset.columns()
+        type_counts: dict[str, int] = {}
+        numeric_columns: list[str] = []
+        temporal_columns: list[str] = []
+        text_columns: list[str] = []
+        boolean_columns: list[str] = []
+
+        for column in columns:
+            type_name = self._dataset.column_type_name(column)
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
+            if type_name in {"int", "float"}:
+                numeric_columns.append(column)
+            elif type_name in {"date", "datetime"}:
+                temporal_columns.append(column)
+            elif type_name == "bool":
+                boolean_columns.append(column)
+            else:
+                text_columns.append(column)
+
+        type_summary = ", ".join(f"{name}: {count}" for name, count in sorted(type_counts.items()))
+        row_count = self._model.range_summary()[2]
         lines = [
-            f"Rows\n{profile.row_count}",
-            f"Columns\n{profile.column_count}",
+            f"Rows\n{row_count}",
+            f"Columns\n{len(columns)}",
             f"Column types\n{type_summary or '-'}",
-            f"Numeric columns\n{', '.join(profile.numeric_columns[:8]) or '-'}",
-            f"Temporal columns\n{', '.join(profile.temporal_columns[:8]) or '-'}",
-            f"Boolean columns\n{', '.join(profile.boolean_columns[:8]) or '-'}",
-            f"Text columns\n{', '.join(profile.text_columns[:8]) or '-'}",
+            f"Numeric columns\n{', '.join(numeric_columns[:8]) or '-'}",
+            f"Temporal columns\n{', '.join(temporal_columns[:8]) or '-'}",
+            f"Boolean columns\n{', '.join(boolean_columns[:8]) or '-'}",
+            f"Text columns\n{', '.join(text_columns[:8]) or '-'}",
         ]
-        if profile.null_heavy_columns:
-            null_lines = "\n".join(f"{name} ({count})" for name, count in profile.null_heavy_columns)
-            lines.append(f"Most null-heavy columns\n{null_lines}")
         return lines
 
     def _format_detail_value(self, value: Any) -> str:
